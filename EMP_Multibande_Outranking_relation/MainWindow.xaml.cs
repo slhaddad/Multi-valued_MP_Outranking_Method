@@ -7,6 +7,8 @@
 //   fixe et transitif (score de la méthode contre un panel fixe de vecteurs de l'image), et la suite
 //   des marqueurs est rendue monotone : plus de cycle de Condorcet, stabilité toujours atteinte.
 //   Le classement des n pixels de la fenêtre (MinMaxVecteurs) est inchangé.
+// Version V5 : [V5] ensemble de référence de l'ordre anti-Condorcet = grille régulière de 64 x 64 pixels au plus
+//   couvrant toute l'image (la V4 prenait 256 pixels « un sur s », parfois tous sur une seule ligne).
 // =====================================================================================
 // EMP_Multibande_Outranking_relation
 // Morphologie mathématique multivaluée (images multibandes) avec ordonnancement vectoriel
@@ -384,13 +386,17 @@ namespace EMP_Multibande_Outranking_relation
         // [V4-ANTI-CONDORCET] ORDRE DE RÉFÉRENCE FIXE POUR LE ∧ / ∨ POINT À POINT DE LA RECONSTRUCTION
         // =====================================================================================
         // Méthode : relation de surclassement (L'haddad et Kemmouche).
-        // Problème corrigé : jusqu'ici, le ∧ / ∨ point à point de la reconstruction comparait deux vecteurs
-        // seuls (la méthode appliquée à l'ensemble {A, B}). Cette comparaison n'est pas transitive : elle
-        // admet des cycles de Condorcet (A > B, B > C et C > A), et la reconstruction pouvait tourner en
-        // boucle sans jamais se stabiliser.
-        // Correction : chaque vecteur v reçoit un score FIXE, calculé avec la même méthode et les mêmes
-        // paramètres, mais toujours contre le même panel de référence R : au plus TAILLE_PANEL_REF
-        // vecteurs prélevés une fois pour toutes dans l'image d'entrée f.
+        // Problème corrigé (V4) : le ∧ / ∨ point à point de la reconstruction comparait deux vecteurs seuls
+        // (la méthode appliquée à l'ensemble {A, B}). Cette comparaison n'est pas transitive : elle admet des
+        // cycles de Condorcet (A > B, B > C et C > A), et la reconstruction pouvait tourner en boucle sans
+        // jamais se stabiliser.
+        // Correction (V4) : chaque vecteur v reçoit un score FIXE, calculé avec la même méthode et les mêmes
+        // paramètres, mais toujours contre le même ensemble de référence R.
+        // [V5] R = grille régulière de TAILLE_GRILLE_REF x TAILLE_GRILLE_REF pixels couvrant toute l'image : le
+        // pixel central de chaque case (au plus 64 x 64 = 4096 pixels ; tous les pixels si l'image est plus
+        // petite). Le score de cette méthode ne se décompose pas bande par bande : un échantillon de l'image
+        // reste nécessaire. La V4 prenait 256 pixels « un sur s » dans l'ordre de parcours, qui pouvaient tomber
+        // sur une seule ligne de l'image (par exemple pour une image 512 x 512).
         //   S_R(v) = nombre de vecteurs r du panel R que v surclasse : c'est le score s(X) de MinMaxVecteurs
         //   (même relation de surclassement : alpha(v,r) > beta(v,r), ou alpha = beta > 0 et départage par la
         //   priorité des bandes), calculé contre le panel fixe R au lieu du voisinage.
@@ -398,10 +404,12 @@ namespace EMP_Multibande_Outranking_relation
         // d'égalité : c'est un ordre TOTAL sur les valeurs (réflexif, antisymétrique, transitif), donc
         // aucun cycle de Condorcet n'est possible. Le classement des n pixels de la fenêtre
         // (MinMaxVecteurs) n'est PAS modifié : seul le ∧ / ∨ point à point de la reconstruction change.
-        private const int TAILLE_PANEL_REF = 256;          // [V4-ANTI-CONDORCET] nombre maximal de vecteurs du panel R
-        private List<int[]> panelRef;                       // [V4-ANTI-CONDORCET] panel de référence R
+        private const int TAILLE_GRILLE_REF = 64;           // [V5] grille de référence : au plus 64 x 64 = 4096 pixels
+        private List<int[]> panelRef;                       // [V4-ANTI-CONDORCET] panel de référence R (grille régulière [V5])
         private int[] prioriteRef;                          // [V4-ANTI-CONDORCET] ordre des bandes pour le départage
         private Dictionary<int[], double> cacheScoreRef;    // [V4-ANTI-CONDORCET] score déjà calculé de chaque vecteur
+        private List<int[,]> imagesRef;                     // [V5] image f pour laquelle le panel et les scores sont prêts
+        private double[] poidsRef;                          // [V5] poids des bandes pour lesquels le panel est prêt
 
         // [V4-ANTI-CONDORCET] Égalité exacte de deux vecteurs (clé du cache des scores)
         private sealed class ComparateurVecteurs : IEqualityComparer<int[]>
@@ -426,26 +434,40 @@ namespace EMP_Multibande_Outranking_relation
             }
         }
 
-        // [V4-ANTI-CONDORCET] Construction du panel R (prélèvement systématique : un pixel sur 'pas', dans
-        // l'ordre de parcours x puis y de l'image d'entrée) et de l'ordre de départage des bandes.
+        // [V4-ANTI-CONDORCET] [V5] Construction du panel R (grille régulière) et de l'ordre de départage des bandes.
         private void PreparerOrdreReference(List<int[,]> imagesMat, double[] poids)
         {
+            // [V5] Le panel et les scores ne dépendent que de l'image f : la reconstruction est appelée pour chaque
+            // taille d'ES avec la même image ; s'ils sont déjà prêts pour cette image, rien n'est recalculé.
+            if (ReferenceEquals(imagesMat, imagesRef) && cacheScoreRef != null && poidsRef != null && poidsRef.Length == poids.Length)
+            {
+                bool memesPoids = true;
+                for (int k = 0; k < poids.Length; k++)
+                    if (poidsRef[k] != poids[k]) { memesPoids = false; break; }
+                if (memesPoids) return;
+            }
             int m = imagesMat.Count;
             int W = imagesMat[0].GetLength(0), H = imagesMat[0].GetLength(1);
-            int total = W * H;
-            int pas = Math.Max(1, (total + TAILLE_PANEL_REF - 1) / TAILLE_PANEL_REF);
+            // [V5] Panel = grille régulière nx x ny couvrant toute l'image : pixel central de chaque case
+            int nx = Math.Min(TAILLE_GRILLE_REF, W), ny = Math.Min(TAILLE_GRILLE_REF, H);
             panelRef = new List<int[]>();
-            for (int p = 0; p < total; p += pas)
+            for (int i = 0; i < nx; i++)
             {
-                int[] v = new int[m];
-                for (int k = 0; k < m; k++) v[k] = imagesMat[k][p / H, p % H];
-                panelRef.Add(v);
+                int x = (int)((i + 0.5) * W / nx);
+                for (int j = 0; j < ny; j++)
+                {
+                    int y = (int)((j + 0.5) * H / ny);
+                    int[] v = new int[m];
+                    for (int k = 0; k < m; k++) v[k] = imagesMat[k][x, y];
+                    panelRef.Add(v);
+                }
             }
             // Départage : même priorité des bandes que la méthode (GetPriorityIndices : poids décroissants ;
             // à poids égaux, la bande d'indice le plus petit d'abord)
             prioriteRef = GetPriorityIndices(poids);
-
+            poidsRef = (double[])poids.Clone();
             cacheScoreRef = new Dictionary<int[], double>(new ComparateurVecteurs());
+            imagesRef = imagesMat;
         }
 
         // [V4-ANTI-CONDORCET] Vrai si le vecteur a surclasse le vecteur b (même règle que MinMaxVecteurs) :
@@ -485,7 +507,7 @@ namespace EMP_Multibande_Outranking_relation
         }
 
         // [V4-ANTI-CONDORCET] Comparaison de deux vecteurs pour le ∧ / ∨ point à point de la reconstruction :
-        // score fixe (contre le panel R), puis ordre lexicographique des bandes (prioriteRef) en cas d'égalité.
+        // score fixe (contre l'ensemble de référence R), puis ordre lexicographique des bandes (prioriteRef) en cas d'égalité.
         // C'est un ordre total sur les valeurs : il est transitif, aucun cycle de Condorcet n'est possible.
         // Retourne -1 si A < B, 0 si A et B sont le même vecteur, 1 si A > B.
         private int CompareReference(List<int[,]> imgA, int xa, int ya, List<int[,]> imgB, int xb, int yb)
